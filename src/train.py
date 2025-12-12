@@ -5,7 +5,8 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from tqdm import tqdm
 
-from models.transformer_lc import TransformerLC
+from .models.transformer_lc import TransformerLC
+
 
 
 class ToyLongContextDataset(Dataset):

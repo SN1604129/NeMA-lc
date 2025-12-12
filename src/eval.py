@@ -3,8 +3,8 @@ import argparse
 import torch
 from torch.utils.data import DataLoader
 
-from train import ToyLongContextDataset
-from models.transformer_lc import TransformerLC
+from .train import ToyLongContextDataset
+from .models.transformer_lc import TransformerLC
 
 
 def main():
