@@ -19,12 +19,21 @@ class AuxOut:
 
 class TinyTransformerEncoder(nn.Module):
     """
-    Minimal encoder for sanity checks.
+    Minimal encoder for sanity checks and long-context tasks.
     Input: token ids (B, T)
     Output: ctx (B, D) [CLS-like], token states (B, T, D)
     """
-    def __init__(self, vocab_size: int, d_model: int, n_layers: int, n_heads: int, max_len: int = 512):
+    def __init__(
+        self,
+        vocab_size: int,
+        d_model: int,
+        n_layers: int,
+        n_heads: int,
+        max_len: int = 2048,   # ✅ FIX: support LRA (>=1024)
+    ):
         super().__init__()
+
+        self.max_len = max_len
         self.emb = nn.Embedding(vocab_size, d_model)
         self.pos = nn.Embedding(max_len, d_model)
 
@@ -39,6 +48,14 @@ class TinyTransformerEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor):
         B, T = x.shape
+
+        # Safety check (helps debugging & reviewers)
+        if T > self.max_len:
+            raise ValueError(
+                f"Sequence length {T} exceeds max_len {self.max_len}. "
+                "Increase positional embedding size."
+            )
+
         pos_ids = torch.arange(T, device=x.device).unsqueeze(0).expand(B, T)
         h = self.emb(x) + self.pos(pos_ids)
         h = self.enc(h)
@@ -67,11 +84,18 @@ class TransformerLC(nn.Module):
         super().__init__()
         self.use_memory = bool(use_memory)
 
-        self.encoder = TinyTransformerEncoder(vocab_size, d_model, n_layers, n_heads)
+        self.encoder = TinyTransformerEncoder(
+            vocab_size=vocab_size,
+            d_model=d_model,
+            n_layers=n_layers,
+            n_heads=n_heads,
+            max_len=2048,  # explicitly long-context safe
+        )
+
         self.mem = MemorySlots(n_slots=mem_slots, mem_dim=d_model)
         self.controller = MemoryController(mem_dim=d_model, hidden=controller_hidden)
 
-        # ✅ WRITE + SLOT OPS SHARE ONE BUDGET
+        # WRITE + SLOT OPS SHARE ONE BUDGET
         self.allocator = TopKAllocatorWithWrite(K_total=K_ops)
 
         self.head = nn.Linear(d_model, n_classes)
@@ -115,7 +139,7 @@ class TransformerLC(nn.Module):
                 ctx2,
             )
 
-            # ✅ ALLOCATION: slot ops + write under same K
+            # ALLOCATION: slot ops + write under same K
             op_mask, write_mask = self.allocator(slot_scores, write_score)
 
             # Lifecycle op per selected slot
