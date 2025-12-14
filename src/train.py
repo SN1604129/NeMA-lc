@@ -47,6 +47,12 @@ def main():
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-4)
+
+    # Explicit lifecycle loss weights (Paper 2)
+    ap.add_argument("--lambda_write", type=float, default=1e-2)
+    ap.add_argument("--lambda_forget", type=float, default=1e-2)
+    ap.add_argument("--lambda_stability", type=float, default=1e-3)
+
     args = ap.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -85,7 +91,11 @@ def main():
         logger.writerow([
             "epoch",
             "step",
-            "loss",
+            "loss_total",
+            "loss_task",
+            "loss_write",
+            "loss_forget",
+            "loss_stability",
             "accuracy",
             "utilization",
             "avg_age",
@@ -113,12 +123,37 @@ def main():
                 model.reset_memory(batch_size=x.size(0), device=x.device)
 
             logits, aux = model(x)
-            loss = ce(logits, y)
 
-            # Stability penalty (churn)
+            # Task loss
+            loss_task = ce(logits, y)
+            loss = loss_task
+
+            # -------------------------
+            # Explicit lifecycle losses
+            # -------------------------
+            loss_write = torch.tensor(0.0, device=device)
+            loss_forget = torch.tensor(0.0, device=device)
+            loss_stability = torch.tensor(0.0, device=device)
+
             if args.use_memory and aux.stats is not None:
-                churn = (aux.mem_after - aux.mem_before).pow(2).mean()
-                loss = loss + 1e-3 * churn
+                # 1) Write budget loss
+                loss_write = aux.stats.writes
+
+                # 2) Forget utility loss (proxy):
+                # penalize forgetting when attention is high (mean attention mass)
+                attn_mean = aux.attn.mean()
+                loss_forget = aux.stats.forgets * attn_mean
+
+                # 3) Stability / churn loss
+                loss_stability = (aux.mem_after - aux.mem_before).pow(2).mean()
+
+                # Combine
+                loss = (
+                    loss_task
+                    + args.lambda_write * loss_write
+                    + args.lambda_forget * loss_forget
+                    + args.lambda_stability * loss_stability
+                )
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -131,20 +166,26 @@ def main():
             total += y.numel()
             acc = correct / max(total, 1)
 
-            # Progress bar
+            # Progress bar + CSV logging
             if args.use_memory and aux.stats is not None:
                 pbar.set_postfix(
                     loss=float(loss.item()),
                     acc=acc,
                     util=float(aux.stats.utilization.item()),
                     age=float(aux.stats.avg_age.item()),
+                    w=float(loss_write.item()),
+                    f=float(loss_forget.item()),
+                    s=float(loss_stability.item()),
                 )
 
-                # ---- CSV LOGGING ----
                 logger.writerow([
                     ep,
                     global_step,
                     float(loss.item()),
+                    float(loss_task.item()),
+                    float(loss_write.item()),
+                    float(loss_forget.item()),
+                    float(loss_stability.item()),
                     acc,
                     float(aux.stats.utilization.item()),
                     float(aux.stats.avg_age.item()),
@@ -154,6 +195,22 @@ def main():
                 ])
             else:
                 pbar.set_postfix(loss=float(loss.item()), acc=acc)
+
+                logger.writerow([
+                    ep,
+                    global_step,
+                    float(loss.item()),
+                    float(loss_task.item()),
+                    0.0,
+                    0.0,
+                    0.0,
+                    acc,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ])
 
             global_step += 1
 
