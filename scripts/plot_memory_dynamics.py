@@ -2,87 +2,79 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-# -------------------------
-# Config
-# -------------------------
 CSV_PATH = Path("logs/memory_dynamics_lra.csv")
-OUT_DIR = Path("plots")
-OUT_DIR.mkdir(exist_ok=True)
+OUT = Path("plots")
+OUT.mkdir(exist_ok=True)
 
-SMOOTH_WINDOW = 50  # moving average window
-
-# -------------------------
-# Load data
-# -------------------------
 df = pd.read_csv(CSV_PATH)
 
-# Safety: sort by step
-df = df.sort_values("step")
+# ---- Robust step detection ----
+if "step" in df.columns:
+    step_col = "step"
+elif "global_step" in df.columns:
+    step_col = "global_step"
+else:
+    # fallback: use row index
+    df["step_idx"] = range(len(df))
+    step_col = "step_idx"
 
-# -------------------------
-# Helper: smooth curves
-# -------------------------
-def smooth(series, window=SMOOTH_WINDOW):
-    return series.rolling(window=window, min_periods=1).mean()
+df = df.sort_values(step_col)
 
-# -------------------------
-# Plot 1: Memory Utilization
-# -------------------------
-plt.figure(figsize=(6, 4))
-plt.plot(df["step"], smooth(df["utilization"]), label="Utilization")
-plt.xlabel("Training step")
-plt.ylabel("Fraction of active slots")
-plt.title("Memory Utilization Over Time")
-plt.grid(True)
-plt.tight_layout()
-plt.savefig(OUT_DIR / "utilization.png", dpi=200)
-plt.close()
+def smooth(x, w=50):
+    return x.rolling(w, min_periods=1).mean()
 
-# -------------------------
-# Plot 2: Average Memory Age
-# -------------------------
-plt.figure(figsize=(6, 4))
-plt.plot(df["step"], smooth(df["avg_age"]), label="Avg age", color="orange")
-plt.xlabel("Training step")
-plt.ylabel("Average age")
-plt.title("Memory Age Over Time")
-plt.grid(True)
-plt.tight_layout()
-plt.savefig(OUT_DIR / "avg_age.png", dpi=200)
-plt.close()
-
-# -------------------------
-# Plot 3: Lifecycle Operation Rates
-# -------------------------
-plt.figure(figsize=(6, 4))
-plt.plot(df["step"], smooth(df["writes"]), label="Write")
-plt.plot(df["step"], smooth(df["updates"]), label="Update")
-plt.plot(df["step"], smooth(df["forgets"]), label="Forget")
-plt.xlabel("Training step")
-plt.ylabel("Rate")
-plt.title("Memory Lifecycle Operations")
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.savefig(OUT_DIR / "lifecycle_ops.png", dpi=200)
-plt.close()
-
-# -------------------------
-# Plot 4: Loss components (optional but strong)
-# -------------------------
-if {"loss_task", "loss_write", "loss_forget", "loss_stability"}.issubset(df.columns):
-    plt.figure(figsize=(6, 4))
-    plt.plot(df["step"], smooth(df["loss_task"]), label="Task")
-    plt.plot(df["step"], smooth(df["loss_write"]), label="Write")
-    plt.plot(df["step"], smooth(df["loss_forget"]), label="Forget")
-    plt.plot(df["step"], smooth(df["loss_stability"]), label="Stability")
+# ---- Utilization ----
+if "utilization" in df.columns:
+    plt.figure(figsize=(7, 5))
+    plt.plot(df[step_col], smooth(df["utilization"]))
     plt.xlabel("Training step")
-    plt.ylabel("Loss")
-    plt.title("Loss Components Over Time")
+    plt.ylabel("Memory utilization")
+    plt.title("Memory Utilization over Training")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(OUT / "utilization.png", dpi=200)
+    plt.close()
+
+# ---- Average Age ----
+if "avg_age" in df.columns:
+    plt.figure(figsize=(7, 5))
+    plt.plot(df[step_col], smooth(df["avg_age"]))
+    plt.xlabel("Training step")
+    plt.ylabel("Average memory age")
+    plt.title("Average Memory Age")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(OUT / "avg_age.png", dpi=200)
+    plt.close()
+
+# ---- Lifecycle Ops ----
+if all(c in df.columns for c in ["writes", "updates", "forgets"]):
+    plt.figure(figsize=(7, 5))
+    plt.plot(df[step_col], smooth(df["writes"]), label="writes")
+    plt.plot(df[step_col], smooth(df["updates"]), label="updates")
+    plt.plot(df[step_col], smooth(df["forgets"]), label="forgets")
+    plt.xlabel("Training step")
+    plt.ylabel("Operation rate")
+    plt.title("Memory Lifecycle Operations")
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(OUT_DIR / "loss_components.png", dpi=200)
+    plt.savefig(OUT / "lifecycle_ops.png", dpi=200)
     plt.close()
 
-print("Plots saved to:", OUT_DIR.resolve())
+# ---- Loss components (Paper 2 specific) ----
+loss_cols = ["loss_task", "loss_write", "loss_forget", "loss_stability"]
+if all(c in df.columns for c in loss_cols):
+    plt.figure(figsize=(7, 5))
+    for c in loss_cols:
+        plt.plot(df[step_col], smooth(df[c]), label=c)
+    plt.xlabel("Training step")
+    plt.ylabel("Loss")
+    plt.title("Lifecycle Loss Components")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(OUT / "loss_components.png", dpi=200)
+    plt.close()
+
+print("Plots saved to:", OUT.resolve())
