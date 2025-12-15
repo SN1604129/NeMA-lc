@@ -5,7 +5,7 @@ from pathlib import Path
 # -------------------------
 # Config
 # -------------------------
-CSV_PATH = Path("logs/memory_dynamics.csv")
+CSV_PATH = Path("logs/memory_dynamics_lra.csv")
 OUT_DIR = Path("plots")
 OUT_DIR.mkdir(exist_ok=True)
 
