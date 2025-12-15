@@ -29,6 +29,7 @@ class MemorySlots(nn.Module):
         self.mem_dim = int(mem_dim)
         self.device = device
 
+        # "empty slot" content template
         self.empty = nn.Parameter(torch.zeros(mem_dim))
 
         self._mem: torch.Tensor | None = None
@@ -74,6 +75,7 @@ class MemorySlots(nn.Module):
         """
         B, N, D = self.mem.shape
         q = query.view(B, 1, D)
+
         logits = (self.mem * q).sum(dim=-1)
         logits = logits.masked_fill(~self.alive, float("-inf"))
 
@@ -82,6 +84,7 @@ class MemorySlots(nn.Module):
 
         read_vec = (attn.unsqueeze(-1) * self.mem).sum(dim=1)
 
+        # Exponential moving average usage
         with torch.no_grad():
             self._usage = 0.95 * self._usage + 0.05 * attn
 
@@ -106,11 +109,14 @@ class MemorySlots(nn.Module):
         B, N, D = self.mem.shape
         dev = self.mem.device
 
-        # age increments for alive slots
-        with torch.no_grad():
-            self._age = self._age + self._alive.float()
+        # Track what actually happened (helps stable logging)
+        updated_mask = update_mask.clone()
+        forgotten_mask = forget_mask.clone()
+        written_mask = write_mask.clone()
 
+        # -------------------------
         # FORGET
+        # -------------------------
         if bool(forget_mask.any()):
             self._mem = torch.where(
                 forget_mask.unsqueeze(-1),
@@ -122,21 +128,31 @@ class MemorySlots(nn.Module):
                 self._age = torch.where(forget_mask, torch.zeros_like(self._age), self._age)
                 self._usage = torch.where(forget_mask, torch.zeros_like(self._usage), self._usage)
 
+        # -------------------------
         # UPDATE
+        # -------------------------
+        # NOTE: We DO NOT reset age on update by default.
+        # Updating means "refine content" not "newly written slot".
         if bool(update_mask.any()):
             u = update_mask.float().unsqueeze(-1)  # (B,N,1)
             upd = update_vec.view(B, 1, D).expand(B, N, D)
+
             self._mem = (1.0 - u) * self._mem + u * (0.5 * self._mem + 0.5 * upd)
+
             with torch.no_grad():
                 self._alive = self._alive | update_mask
-                self._age = torch.where(update_mask, torch.zeros_like(self._age), self._age)
+                # Keep age as-is for updated slots (no reset)
 
+        # -------------------------
         # RETAIN (metadata only)
+        # -------------------------
         if bool(retain_mask.any()):
             with torch.no_grad():
                 self._alive = self._alive | retain_mask
 
-        # WRITE (✅ non-inplace: clone then assign)
+        # -------------------------
+        # WRITE (overwrite chosen slot per batch element)
+        # -------------------------
         if bool(write_mask.any()):
             b_idx = torch.arange(B, device=dev)
             tgt = overwrite_idx.clamp(min=0, max=N - 1)
@@ -151,18 +167,33 @@ class MemorySlots(nn.Module):
                 self._age[b_idx[wm], tgt[wm]] = 0.0
                 self._usage[b_idx[wm], tgt[wm]] = 0.0
 
+        # -------------------------
+        # AGE TICK (after lifecycle ops)
+        # -------------------------
+        # Age increases for slots that are alive at the end of this step.
+        # Newly written slots have age=0 already, and will become age=1 on next step.
+        with torch.no_grad():
+            self._age = self._age + self._alive.float()
+
         # Detach state so it never carries graphs across steps/batches
         self._mem = self._mem.detach()
         self._age = self._age.detach()
         self._usage = self._usage.detach()
         self._alive = self._alive.detach()
 
+        # -------------------------
+        # STATS
+        # -------------------------
         utilization = self._alive.float().mean()
+
         denom = self._alive.float().sum() + 1e-6
         avg_age = torch.where(self._alive, self._age, torch.zeros_like(self._age)).sum() / denom
 
-        writes = write_mask.float().mean()
-        updates = update_mask.float().mean()
-        forgets = forget_mask.float().mean()
+        # Per-step operation rates
+        # - writes: fraction of batch elements that wrote
+        # - updates/forgets: fraction of slots operated on (mean over B,N)
+        writes = written_mask.float().mean()
+        updates = updated_mask.float().mean()
+        forgets = forgotten_mask.float().mean()
 
         return MemoryStats(utilization, avg_age, writes, updates, forgets)
