@@ -80,6 +80,10 @@ class TransformerLC(nn.Module):
         K_ops: int = 4,
         controller_hidden: int = 256,
         use_memory: bool = True,
+
+        # ✅ NEW: ablation knobs (must be passed from train.py)
+        write_tau: float = 0.4,
+        util_cap: float = 0.7,
     ):
         super().__init__()
         self.use_memory = bool(use_memory)
@@ -96,8 +100,12 @@ class TransformerLC(nn.Module):
         self.controller = MemoryController(mem_dim=d_model, hidden=controller_hidden)
 
         # WRITE + SLOT OPS SHARE ONE BUDGET
-        # NOTE: allocator now supports write gating via write_tau/util_cap in memory_controller.py
-        self.allocator = TopKAllocatorWithWrite(K_total=K_ops)
+        # ✅ allocator supports write gating; wire args here
+        self.allocator = TopKAllocatorWithWrite(
+            K_total=K_ops,
+            write_tau=write_tau,
+            util_cap=util_cap,
+        )
 
         self.head = nn.Linear(d_model, n_classes)
 
@@ -145,7 +153,11 @@ class TransformerLC(nn.Module):
             util = self.mem.alive.float().mean(dim=1)
 
             # ALLOCATION: slot ops + write under same K, with utilization gate
-            op_mask, write_mask = self.allocator(slot_scores, write_score, utilization=util)
+            op_mask, write_mask = self.allocator(
+                slot_scores,
+                write_score,
+                utilization=util,
+            )
 
             # Lifecycle op per selected slot
             op_choice = torch.argmax(p_ops, dim=-1)  # 0 retain, 1 update, 2 forget

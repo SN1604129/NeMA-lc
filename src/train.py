@@ -90,19 +90,32 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-4)
 
     # Logging name (lets you generate: full / noforget / nowrite / nostability)
-    ap.add_argument("--run_name", type=str, default=None,
-                    help="Optional run name for log file, e.g., full, noforget, nowrite, nostability.")
+    ap.add_argument(
+        "--run_name",
+        type=str,
+        default=None,
+        help="Optional run name for log file, e.g. full, noforget, nowrite, nostability."
+    )
 
     # Memory reset mode:
     # - episodic_reset=True  => reset memory each batch (your old behavior)
     # - episodic_reset=False => keep memory across batches within an epoch (needed for meaningful avg_age)
-    ap.add_argument("--episodic_reset", action="store_true",
-                    help="If set, reset memory at every batch (episodic). Default keeps memory across batches.")
+    ap.add_argument(
+        "--episodic_reset",
+        action="store_true",
+        help="If set, reset memory at every batch (episodic). Default keeps memory across batches."
+    )
 
     # Lifecycle loss weights
     ap.add_argument("--lambda_write", type=float, default=1e-2)
     ap.add_argument("--lambda_forget", type=float, default=1e-2)
     ap.add_argument("--lambda_stability", type=float, default=1e-3)
+
+    # ✅ NEW: allocator / lifecycle control knobs (for ablations)
+    ap.add_argument("--write_tau", type=float, default=0.4,
+                    help="Write gate threshold (higher => fewer writes).")
+    ap.add_argument("--util_cap", type=float, default=0.7,
+                    help="Stop writing when utilization >= util_cap.")
 
     args = ap.parse_args()
 
@@ -130,6 +143,9 @@ def main():
     # -------------------------
     # Model
     # -------------------------
+    # ✅ NEW: pass write_tau and util_cap to TransformerLC
+    # NOTE: If you get "unexpected keyword argument", then TransformerLC.__init__()
+    # must be updated to accept these and pass into TopKAllocatorWithWrite.
     model = TransformerLC(
         vocab_size=vocab_size,
         d_model=128,
@@ -140,6 +156,8 @@ def main():
         K_ops=4,
         controller_hidden=256,
         use_memory=args.use_memory,
+        write_tau=args.write_tau,
+        util_cap=args.util_cap,
     ).to(device)
 
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr)
@@ -158,7 +176,9 @@ def main():
     logger = csv.writer(log_f)
 
     if write_header:
+        # ✅ NEW: include write_tau, util_cap, run_tag so ablations are traceable
         logger.writerow([
+            "run_name", "write_tau", "util_cap",
             "epoch", "step",
             "loss_total", "loss_task",
             "loss_write", "loss_forget", "loss_stability",
@@ -247,6 +267,7 @@ def main():
                 )
 
                 logger.writerow([
+                    run_tag, float(args.write_tau), float(args.util_cap),
                     ep, global_step,
                     float(loss.item()), float(loss_task.item()),
                     float(loss_write.item()),
