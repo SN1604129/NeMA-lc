@@ -96,6 +96,7 @@ class TransformerLC(nn.Module):
         self.controller = MemoryController(mem_dim=d_model, hidden=controller_hidden)
 
         # WRITE + SLOT OPS SHARE ONE BUDGET
+        # NOTE: allocator now supports write gating via write_tau/util_cap in memory_controller.py
         self.allocator = TopKAllocatorWithWrite(K_total=K_ops)
 
         self.head = nn.Linear(d_model, n_classes)
@@ -139,8 +140,12 @@ class TransformerLC(nn.Module):
                 ctx2,
             )
 
-            # ALLOCATION: slot ops + write under same K
-            op_mask, write_mask = self.allocator(slot_scores, write_score)
+            # ✅ UTILIZATION for write gating
+            # (B,) fraction of alive slots per batch element
+            util = self.mem.alive.float().mean(dim=1)
+
+            # ALLOCATION: slot ops + write under same K, with utilization gate
+            op_mask, write_mask = self.allocator(slot_scores, write_score, utilization=util)
 
             # Lifecycle op per selected slot
             op_choice = torch.argmax(p_ops, dim=-1)  # 0 retain, 1 update, 2 forget

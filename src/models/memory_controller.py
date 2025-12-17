@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import torch
 import torch.nn as nn
 
@@ -19,7 +20,7 @@ class TopKAllocator(nn.Module):
         """
         B, N = slot_scores.shape
         K = min(self.K_ops, N)
-        topk_idx = torch.topk(slot_scores, k=K, dim=-1).indices  # (B,K)
+        topk_idx = torch.topk(slot_scores, k=K, dim=-1).indices  # (B, K)
         mask = torch.zeros(B, N, dtype=torch.bool, device=slot_scores.device)
         mask.scatter_(dim=1, index=topk_idx, value=True)
         return mask
@@ -34,17 +35,28 @@ class TopKAllocatorWithWrite(nn.Module):
       - 1 write score
 
     Then select top-K actions. If the write action is selected, write_mask=True.
+
+    IMPORTANT:
+    We additionally gate writing with:
+      - a threshold on write_score (write_tau)
+      - a utilization cap (util_cap) to prevent always-overwriting at saturation
+
+    This avoids the common failure mode: writes == 1.0 at every step.
     """
-    def __init__(self, K_total: int):
+    def __init__(self, K_total: int, write_tau: float = 0.2, util_cap: float = 0.90):
         super().__init__()
         self.K_total = int(K_total)
+        self.write_tau = float(write_tau)
+        self.util_cap = float(util_cap)
 
     @torch.no_grad()
-    def forward(self, slot_scores: torch.Tensor, write_score: torch.Tensor):
+    def forward(
+        self,
+        slot_scores: torch.Tensor,     # (B, N)
+        write_score: torch.Tensor,     # (B,)
+        utilization: torch.Tensor | None = None,  # (B,) or scalar
+    ):
         """
-        slot_scores: (B, N)
-        write_score: (B,)
-
         returns:
           op_mask: (B, N) bool
           write_mask: (B,) bool
@@ -52,7 +64,6 @@ class TopKAllocatorWithWrite(nn.Module):
         B, N = slot_scores.shape
         K = min(self.K_total, N + 1)
 
-        # concat write as an extra action
         action_scores = torch.cat([slot_scores, write_score.unsqueeze(-1)], dim=-1)  # (B, N+1)
         topk_idx = torch.topk(action_scores, k=K, dim=-1).indices  # (B, K)
 
@@ -61,6 +72,19 @@ class TopKAllocatorWithWrite(nn.Module):
 
         op_mask = action_mask[:, :N]
         write_mask = action_mask[:, N]
+
+        # ---- WRITE GATING ----
+        # 1) threshold gate: write only when score is confident
+        write_mask = write_mask & (write_score > self.write_tau)
+
+        # 2) utilization gate: avoid constant overwriting when memory is already full
+        if utilization is not None:
+            if utilization.ndim == 0:
+                util_b = utilization.expand(B)
+            else:
+                util_b = utilization
+            write_mask = write_mask & (util_b < self.util_cap)
+
         return op_mask, write_mask
 
 
@@ -99,10 +123,10 @@ class MemoryController(nn.Module):
             nn.Linear(hidden, hidden),
             nn.ReLU(),
         )
-        self.ops_head = nn.Linear(hidden, 3)   # retain/update/forget logits
-        self.score_head = nn.Linear(hidden, 1) # slot utility
+        self.ops_head = nn.Linear(hidden, 3)    # retain/update/forget logits
+        self.score_head = nn.Linear(hidden, 1)  # slot utility
 
-        # write score uses ctx + novelty (ctx - readout proxy); for now use ctx + ctx_norm
+        # write score uses ctx + a simple stable feature: norm(ctx)
         self.write_head = nn.Sequential(
             nn.Linear(mem_dim + 1, hidden),
             nn.ReLU(),
@@ -112,8 +136,8 @@ class MemoryController(nn.Module):
     def forward(self, mem: torch.Tensor, age: torch.Tensor, usage: torch.Tensor, ctx: torch.Tensor):
         """
         Returns:
-          p_ops: (B,N,3)
-          slot_scores: (B,N)
+          p_ops: (B, N, 3)
+          slot_scores: (B, N)
           write_score: (B,)
         """
         B, N, D = mem.shape
@@ -125,16 +149,15 @@ class MemoryController(nn.Module):
         if self.use_usage:
             feats.append(usage.unsqueeze(-1))
 
-        x = torch.cat(feats, dim=-1)              # (B,N,feat)
-        h = self.mlp(x)                           # (B,N,H)
+        x = torch.cat(feats, dim=-1)               # (B, N, feat_dim)
+        h = self.mlp(x)                            # (B, N, hidden)
 
-        ops_logits = self.ops_head(h)             # (B,N,3)
+        ops_logits = self.ops_head(h)              # (B, N, 3)
         p_ops = torch.softmax(ops_logits, dim=-1)
 
-        slot_scores = self.score_head(h).squeeze(-1)  # (B,N)
+        slot_scores = self.score_head(h).squeeze(-1)  # (B, N)
 
-        # A simple, stable write feature: norm(ctx)
-        ctx_norm = torch.norm(ctx, dim=-1, keepdim=True)  # (B,1)
+        ctx_norm = torch.norm(ctx, dim=-1, keepdim=True)  # (B, 1)
         write_in = torch.cat([ctx, ctx_norm], dim=-1)     # (B, D+1)
         write_score = self.write_head(write_in).squeeze(-1)  # (B,)
 
