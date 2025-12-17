@@ -109,7 +109,10 @@ class MemorySlots(nn.Module):
         B, N, D = self.mem.shape
         dev = self.mem.device
 
-        # Track what actually happened (helps stable logging)
+        # Track which specific slots were written/overwritten this step
+        written_slots = torch.zeros(B, N, dtype=torch.bool, device=dev)
+
+        # Track ops for logging (stable)
         updated_mask = update_mask.clone()
         forgotten_mask = forget_mask.clone()
         written_mask = write_mask.clone()
@@ -131,8 +134,7 @@ class MemorySlots(nn.Module):
         # -------------------------
         # UPDATE
         # -------------------------
-        # NOTE: We DO NOT reset age on update by default.
-        # Updating means "refine content" not "newly written slot".
+        # Keep age on update by default (update = refine content, not rewrite)
         if bool(update_mask.any()):
             u = update_mask.float().unsqueeze(-1)  # (B,N,1)
             upd = update_vec.view(B, 1, D).expand(B, N, D)
@@ -141,7 +143,6 @@ class MemorySlots(nn.Module):
 
             with torch.no_grad():
                 self._alive = self._alive | update_mask
-                # Keep age as-is for updated slots (no reset)
 
         # -------------------------
         # RETAIN (metadata only)
@@ -158,6 +159,9 @@ class MemorySlots(nn.Module):
             tgt = overwrite_idx.clamp(min=0, max=N - 1)
             wm = write_mask
 
+            # Mark written slots for retention-age computation
+            written_slots[b_idx[wm], tgt[wm]] = True
+
             new_mem = self._mem.clone()
             new_mem[b_idx[wm], tgt[wm], :] = write_vec[wm]
             self._mem = new_mem
@@ -170,8 +174,6 @@ class MemorySlots(nn.Module):
         # -------------------------
         # AGE TICK (after lifecycle ops)
         # -------------------------
-        # Age increases for slots that are alive at the end of this step.
-        # Newly written slots have age=0 already, and will become age=1 on next step.
         with torch.no_grad():
             self._age = self._age + self._alive.float()
 
@@ -186,12 +188,12 @@ class MemorySlots(nn.Module):
         # -------------------------
         utilization = self._alive.float().mean()
 
-        denom = self._alive.float().sum() + 1e-6
-        avg_age = torch.where(self._alive, self._age, torch.zeros_like(self._age)).sum() / denom
+        # IMPORTANT:
+        # avg_age should reflect retention, not freshly written slots.
+        eligible = self._alive & (~written_slots)
+        denom = eligible.float().sum() + 1e-6
+        avg_age = torch.where(eligible, self._age, torch.zeros_like(self._age)).sum() / denom
 
-        # Per-step operation rates
-        # - writes: fraction of batch elements that wrote
-        # - updates/forgets: fraction of slots operated on (mean over B,N)
         writes = written_mask.float().mean()
         updates = updated_mask.float().mean()
         forgets = forgotten_mask.float().mean()
