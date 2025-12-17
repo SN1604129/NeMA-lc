@@ -2,7 +2,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-CSV_PATH = Path("logs/memory_dynamics_lra.csv")
+CSV_PATH = Path("logs/memory_dynamics_full.csv")
+
 OUT = Path("plots")
 OUT.mkdir(exist_ok=True)
 
